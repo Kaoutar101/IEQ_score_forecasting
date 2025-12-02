@@ -50,8 +50,3 @@ A key objective of this project is to **compare three deep-learning architecture
 
 ---
 
-
-
-
-└── README.md              # Project overview (this file)
-
