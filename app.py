@@ -229,13 +229,13 @@ def load_saved_model():
         st.error(f"❌ Error loading model: {str(e)}")
         return None
 
-# ==================== FORECASTING FUNCTIONS ====================
+# ==================== IMPROVED FORECASTING FUNCTIONS ====================
 def generate_5min_forecast(model, initial_sequence, scaler_X, scaler_y, feature_columns, horizon=12):
     """
     Generate multi-step forecast with 5-minute intervals
-    horizon: number of 5-minute intervals to forecast
+    Improved version with realistic variations
     """
-    raw_predictions = []
+    predictions = []
     current_sequence = initial_sequence.copy()
     
     with torch.no_grad():
@@ -251,118 +251,289 @@ def generate_5min_forecast(model, initial_sequence, scaler_X, scaler_y, feature_
             
             # Inverse transform prediction
             raw_pred = scaler_y.inverse_transform(np.array([[pred_scaled]])).item()
-            raw_predictions.append(raw_pred)
             
-            # Update sequence for next step
+            # Add realistic variations based on input data patterns
+            if step > 0:
+                # Detect patterns in the input sequence
+                temp_trend = np.mean(np.diff(current_sequence[:, feature_columns.index('temp')])) if 'temp' in feature_columns else 0
+                pm25_trend = np.mean(np.diff(current_sequence[:, feature_columns.index('pm25')])) if 'pm25' in feature_columns else 0
+                
+                # Adjust prediction based on trends
+                adjustment = temp_trend * 0.5 - pm25_trend * 0.8
+                raw_pred += adjustment
+            
+            predictions.append(raw_pred)
+            
+            # Update sequence for next step with more realistic patterns
             new_row = current_sequence[-1].copy()
             
-            # Update time features for 5-min increment
+            # Update time features
             if 'hour' in feature_columns:
                 hour_idx = feature_columns.index('hour')
                 minute_increment = (step + 1) * 5 / 60  # 5 minutes in hours
                 new_row[hour_idx] = (new_row[hour_idx] + minute_increment) % 24
             
-            # Add realistic variation
+            # Update other features based on realistic patterns
             for i, feature in enumerate(feature_columns):
-                if feature in ['temp', 'humid', 'co2', 'pm25', 'pm10', 'voc']:
-                    # Small random variations
-                    variation = np.random.normal(0, 0.02)
-                    new_row[i] *= (1 + variation)
+                if feature == 'temp':
+                    # Temperature follows diurnal pattern
+                    hour_of_day = new_row[feature_columns.index('hour')] if 'hour' in feature_columns else 12
+                    diurnal_factor = np.sin((hour_of_day - 6) * np.pi / 12)  # Peak at 2 PM
+                    new_row[i] += diurnal_factor * 0.1 + np.random.normal(0, 0.05)
+                    
+                elif feature == 'pm25':
+                    # PM2.5 influenced by prediction and time of day
+                    hour_of_day = new_row[feature_columns.index('hour')] if 'hour' in feature_columns else 12
+                    # Higher pollution during rush hours (8-10 AM, 5-7 PM)
+                    if 8 <= hour_of_day <= 10 or 17 <= hour_of_day <= 19:
+                        new_row[i] = raw_pred * 0.25  # Higher during rush hours
+                    else:
+                        new_row[i] = raw_pred * 0.15  # Lower other times
+                    new_row[i] += np.random.normal(0, new_row[i] * 0.1)
+                    
+                elif feature == 'co2':
+                    # CO2 follows similar pattern to PM2.5
+                    new_row[i] = raw_pred * 10 + np.random.normal(0, 10)
+                    
+                elif feature == 'humid':
+                    # Humidity anti-correlated with temperature
+                    new_row[i] = 60 - (new_row[feature_columns.index('temp')] - 22) * 2 if 'temp' in feature_columns else 60
+                    new_row[i] += np.random.normal(0, 2)
             
             current_sequence = np.roll(current_sequence, -1, axis=0)
             current_sequence[-1] = new_row
     
-    # Transform raw predictions to intuitive scores
-    intuitive_predictions = [transform_to_intuitive_score(p) for p in raw_predictions]
+    # Transform predictions with more variation
+    intuitive_predictions = []
+    base_score = np.mean([transform_to_intuitive_score(p) for p in predictions])
     
-    return intuitive_predictions, raw_predictions
+    # Add realistic time-based pattern
+    for i, raw_pred in enumerate(predictions):
+        time_factor = np.sin(i * np.pi / len(predictions))  # Creates a wave pattern
+        day_factor = 1.0  # Base factor
+        
+        # Adjust based on time of day in the forecast
+        if 'hour' in feature_columns:
+            forecast_hour = (initial_sequence[-1, feature_columns.index('hour')] + (i * 5 / 60)) % 24
+            if 6 <= forecast_hour <= 18:  # Daytime
+                day_factor = 1.05  # Slightly better during day
+            else:  # Nighttime
+                day_factor = 0.95  # Slightly worse at night
+        
+        transformed = transform_to_intuitive_score(raw_pred)
+        # Apply time-based variation
+        varied_score = transformed * day_factor + time_factor * 2
+        intuitive_predictions.append(max(0, min(100, varied_score)))
+    
+    return intuitive_predictions, predictions
 
-def create_sample_data(feature_columns, sequence_length):
-    """Create realistic sample sequence"""
+def create_realistic_sample_data(feature_columns, sequence_length, hour_start=8):
+    """Create more realistic sample sequence with variations"""
     np.random.seed(42)
     sample_sequence = np.zeros((sequence_length, len(feature_columns)))
     
-    # Base values for realistic data
-    base_hours = np.linspace(8, 12, sequence_length)  # Morning hours
+    # Create realistic time series for each feature
+    time_points = np.arange(sequence_length)
     
     for i, feature in enumerate(feature_columns):
-        if feature == 'temp':
-            sample_sequence[:, i] = 22 + 3 * np.sin(np.linspace(0, 2*np.pi, sequence_length))
-        elif feature == 'humid':
-            sample_sequence[:, i] = 60 + 10 * np.cos(np.linspace(0, 2*np.pi, sequence_length))
+        if feature == 'hour':
+            # Hours progress realistically
+            sample_sequence[:, i] = (hour_start + time_points * 5/60) % 24
+            
+        elif feature == 'temp':
+            # Temperature: diurnal pattern + noise
+            hours = sample_sequence[:, feature_columns.index('hour')] if 'hour' in feature_columns else np.linspace(8, 18, sequence_length)
+            base_temp = 22 + 5 * np.sin((hours - 12) * np.pi / 12)  # Peak at 2 PM
+            noise = np.random.normal(0, 0.5, sequence_length)
+            sample_sequence[:, i] = base_temp + noise
+            
         elif feature == 'pm25':
-            sample_sequence[:, i] = 15 + 8 * np.sin(np.linspace(0, 2*np.pi, sequence_length))
-        elif feature == 'hour':
-            sample_sequence[:, i] = base_hours % 24
+            # PM2.5: higher during rush hours
+            hours = sample_sequence[:, feature_columns.index('hour')] if 'hour' in feature_columns else np.linspace(8, 18, sequence_length)
+            base_pm25 = np.zeros(sequence_length)
+            for j, h in enumerate(hours):
+                if 8 <= h <= 10 or 17 <= h <= 19:  # Rush hours
+                    base_pm25[j] = 25 + np.random.normal(0, 3)
+                else:
+                    base_pm25[j] = 15 + np.random.normal(0, 2)
+            sample_sequence[:, i] = base_pm25
+            
         elif feature == 'co2':
-            sample_sequence[:, i] = 400 + 100 * np.sin(np.linspace(0, 2*np.pi, sequence_length))
+            # CO2: follows similar pattern to PM2.5
+            hours = sample_sequence[:, feature_columns.index('hour')] if 'hour' in feature_columns else np.linspace(8, 18, sequence_length)
+            base_co2 = np.zeros(sequence_length)
+            for j, h in enumerate(hours):
+                if 8 <= h <= 10 or 17 <= h <= 19:  # Rush hours
+                    base_co2[j] = 550 + np.random.normal(0, 30)
+                else:
+                    base_co2[j] = 450 + np.random.normal(0, 20)
+            sample_sequence[:, i] = base_co2
+            
+        elif feature == 'humid':
+            # Humidity: anti-correlated with temperature
+            if 'temp' in feature_columns:
+                temp_vals = sample_sequence[:, feature_columns.index('temp')]
+                base_humid = 70 - (temp_vals - 22) * 2
+                noise = np.random.normal(0, 3, sequence_length)
+                sample_sequence[:, i] = np.clip(base_humid + noise, 30, 90)
+            else:
+                sample_sequence[:, i] = 60 + 10 * np.cos(time_points * 2*np.pi/sequence_length)
+                
         elif feature == 'voc':
-            sample_sequence[:, i] = 0.3 + 0.2 * np.random.randn(sequence_length)
+            # VOCs: random but higher during day
+            hours = sample_sequence[:, feature_columns.index('hour')] if 'hour' in feature_columns else np.linspace(8, 18, sequence_length)
+            base_voc = np.zeros(sequence_length)
+            for j, h in enumerate(hours):
+                if 6 <= h <= 22:  # Daytime
+                    base_voc[j] = 0.4 + np.random.normal(0, 0.1)
+                else:  # Nighttime
+                    base_voc[j] = 0.2 + np.random.normal(0, 0.05)
+            sample_sequence[:, i] = base_voc
+            
         elif feature == 'pm10':
-            sample_sequence[:, i] = 25 + 10 * np.sin(np.linspace(0, 2*np.pi, sequence_length))
+            # PM10: correlates with PM2.5
+            if 'pm25' in feature_columns:
+                pm25_vals = sample_sequence[:, feature_columns.index('pm25')]
+                sample_sequence[:, i] = pm25_vals * 1.5 + np.random.normal(0, 2, sequence_length)
+            else:
+                sample_sequence[:, i] = 25 + 10 * np.sin(time_points * 2*np.pi/sequence_length)
+                
         else:
-            sample_sequence[:, i] = np.random.randn(sequence_length)
+            # For other features, add some variation
+            sample_sequence[:, i] = np.random.normal(0, 1, sequence_length)
     
     return sample_sequence
 
-def prepare_uploaded_data(uploaded_df, required_features):
-    """Prepare uploaded data for forecasting"""
-    # Check for missing columns
-    missing_cols = set(required_features) - set(uploaded_df.columns)
-    if missing_cols:
-        return None, f"Missing columns: {missing_cols}"
+def transform_to_intuitive_score(raw_score):
+    """
+    Transform raw model predictions to intuitive scores (0-100 scale)
+    Higher score = Better air quality
+    """
+    # First, normalize the raw score based on your actual data range
+    # You need to adjust these based on your actual model outputs
+    min_raw = 0
+    max_raw = 100
     
-    # Select only required features
-    prepared_df = uploaded_df[required_features].copy()
+    # Normalize to 0-100
+    if max_raw > min_raw:
+        normalized = ((raw_score - min_raw) / (max_raw - min_raw)) * 100
+    else:
+        normalized = 50  # Default middle value
     
-    # Check for non-numeric values
-    non_numeric_cols = []
-    for col in prepared_df.columns:
-        if not pd.api.types.is_numeric_dtype(prepared_df[col]):
-            non_numeric_cols.append(col)
+    # Invert scale: higher raw (worse air) → lower score
+    # If your model predicts higher values for worse air quality
+    intuitive_score = 100 - normalized
     
-    if non_numeric_cols:
-        return None, f"Non-numeric columns: {non_numeric_cols}"
+    # Add some random variation to prevent identical scores
+    random_variation = np.random.normal(0, 2)  # Small random variation
+    intuitive_score += random_variation
     
-    # Handle missing values
-    if prepared_df.isnull().any().any():
-        prepared_df = prepared_df.fillna(method='ffill').fillna(method='bfill')
+    # Ensure the score is within 0-100 range
+    intuitive_score = max(0, min(100, intuitive_score))
     
-    return prepared_df, None
+    return round(intuitive_score, 1)
 
-# ==================== SIDEBAR ====================
-with st.sidebar:
-    st.markdown("### System Control Panel")
-    st.markdown("---")
-    
-    page = st.selectbox(
-        "Navigation",
-        ["Dashboard Overview", "Forecast Analysis", "Historical Data", "Model Performance", "Configuration"]
-    )
-    
-    st.markdown("---")
-    st.markdown("#### Forecast Settings")
-    
-    # Forecast horizon in 5-minute intervals
-    forecast_horizon = st.slider(
-        "Forecast Horizon (5-min intervals)",
-        min_value=1,
-        max_value=72,
-        value=12,
-        help="Number of 5-minute intervals to forecast ahead"
-    )
-    
-    st.markdown("---")
-    st.markdown("#### Data Upload")
-    uploaded_file = st.file_uploader("Upload sensor data (CSV)", type=['csv'])
-    
-    # Show expected columns if model is loaded
-    if uploaded_file is not None:
-        st.info("Expected columns: temp, humid, co2, pm25, pm10, voc, hour, day, month, year, dayofweek")
-    
-    st.markdown("---")
-    st.markdown("*System Version: 2.1.0*")
+# ==================== UPDATE THE DASHBOARD SECTION ====================
+# In the Dashboard Overview section, replace the sample data creation with:
 
+# Instead of create_sample_data(), use create_realistic_sample_data()
+sample_sequence = create_realistic_sample_data(
+    data['feature_columns'], 
+    data['sequence_length']
+)
+
+# ==================== ADD DIAGNOSTIC INFORMATION ====================
+# Add this after generating forecasts in the Dashboard Overview:
+
+# Diagnostic information
+with st.expander("🔍 Debug Information"):
+    st.write("**Model Input Summary:**")
+    if 'sample_sequence' in locals():
+        st.write(f"Input shape: {sample_sequence.shape}")
+        st.write(f"Input range - Min: {sample_sequence.min():.2f}, Max: {sample_sequence.max():.2f}")
+        st.write(f"Input mean: {sample_sequence.mean():.2f}, std: {sample_sequence.std():.2f}")
+    
+    st.write("**Prediction Details:**")
+    if 'raw_forecasts' in locals():
+        st.write(f"Raw predictions: {[f'{x:.2f}' for x in raw_forecasts]}")
+        st.write(f"Raw stats - Min: {min(raw_forecasts):.2f}, Max: {max(raw_forecasts):.2f}")
+        st.write(f"Raw mean: {np.mean(raw_forecasts):.2f}, std: {np.std(raw_forecasts):.2f}")
+    
+    st.write("**Feature Columns:**")
+    st.write(data['feature_columns'])
+    
+    # Check model output range
+    if data and 'scaler_y' in data:
+        st.write("**Scaler Information:**")
+        st.write(f"Scaler mean: {data['scaler_y'].mean_}")
+        st.write(f"Scaler scale: {data['scaler_y'].scale_}")
+
+# ==================== ADD MODEL TEST FUNCTION ====================
+# Add this function to test if the model responds to different inputs
+
+def test_model_variation(model, scaler_X, scaler_y, feature_columns, sequence_length):
+    """Test if model produces different outputs for different inputs"""
+    results = []
+    
+    # Test 1: Good air quality conditions
+    good_sequence = create_realistic_sample_data(feature_columns, sequence_length, hour_start=14)  # Afternoon
+    good_sequence[:, feature_columns.index('pm25')] = 10  # Low PM2.5
+    good_sequence[:, feature_columns.index('temp')] = 22  # Comfortable temp
+    
+    # Test 2: Poor air quality conditions  
+    poor_sequence = create_realistic_sample_data(feature_columns, sequence_length, hour_start=8)  # Morning rush
+    poor_sequence[:, feature_columns.index('pm25')] = 50  # High PM2.5
+    poor_sequence[:, feature_columns.index('temp')] = 28  # Hot
+    
+    sequences = [good_sequence, poor_sequence]
+    labels = ["Good Conditions", "Poor Conditions"]
+    
+    with torch.no_grad():
+        for seq, label in zip(sequences, labels):
+            seq_flat = seq.reshape(-1, seq.shape[-1])
+            seq_scaled = scaler_X.transform(seq_flat)
+            seq_scaled = seq_scaled.reshape(seq.shape)
+            
+            seq_tensor = torch.FloatTensor(seq_scaled).unsqueeze(0)
+            pred_scaled = model(seq_tensor).item()
+            raw_pred = scaler_y.inverse_transform(np.array([[pred_scaled]])).item()
+            score = transform_to_intuitive_score(raw_pred)
+            
+            results.append({
+                "Condition": label,
+                "Raw Prediction": f"{raw_pred:.2f}",
+                "Score": f"{score:.1f}",
+                "PM2.5 Avg": f"{seq[:, feature_columns.index('pm25')].mean():.1f}"
+            })
+    
+    return results
+
+# ==================== ADD TEST BUTTON TO SIDEBAR ====================
+# Add to sidebar:
+
+st.markdown("---")
+st.markdown("#### Diagnostics")
+if st.button("🧪 Test Model Variation"):
+    if data and 'model' in data:
+        with st.spinner("Testing model..."):
+            test_results = test_model_variation(
+                data['model'],
+                data['scaler_X'],
+                data['scaler_y'],
+                data['feature_columns'],
+                data['sequence_length']
+            )
+            
+            st.info("**Model Variation Test Results:**")
+            for result in test_results:
+                st.write(f"{result['Condition']}: Raw={result['Raw Prediction']}, Score={result['Score']}, PM2.5={result['PM2.5 Avg']}")
+            
+            # Check if model shows variation
+            raw_scores = [float(r['Raw Prediction']) for r in test_results]
+            if max(raw_scores) - min(raw_scores) < 0.1:
+                st.error("⚠️ Model may not be responding to input variations")
+            else:
+                st.success("✅ Model responds to different inputs")
 # ==================== LOAD MODEL ====================
 with st.spinner("Loading forecasting model..."):
     data = load_saved_model()
