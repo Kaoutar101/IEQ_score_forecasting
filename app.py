@@ -3,11 +3,10 @@ import pandas as pd
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.serialization
 import plotly.graph_objects as go
 import plotly.express as px
-import matplotlib.pyplot as plt
 from sklearn.preprocessing import StandardScaler
-import pickle
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -60,54 +59,60 @@ with st.sidebar:
     st.markdown("---")
     st.markdown("**Note**: Using saved LSTM model for predictions")
 
-# Load the saved model
+# Define the model class first (must be identical to training)
+class EnhancedLSTMModel(nn.Module):
+    def __init__(self, input_size, hidden_size, num_layers, output_size, 
+                 dropout_rate=0.3, use_batch_norm=True):
+        super(EnhancedLSTMModel, self).__init__()
+        self.hidden_size = hidden_size
+        self.num_layers = num_layers
+        
+        self.lstm = nn.LSTM(
+            input_size, hidden_size, num_layers, 
+            batch_first=True, dropout=dropout_rate if num_layers > 1 else 0.0
+        )
+        
+        self.batch_norm = nn.BatchNorm1d(hidden_size) if use_batch_norm else None
+        self.dropout = nn.Dropout(dropout_rate)
+        self.fc = nn.Linear(hidden_size, output_size)
+        
+        # Initialize LSTM forget gate biases
+        self._init_weights()
+    
+    def _init_weights(self):
+        for name, param in self.named_parameters():
+            if 'bias' in name and 'lstm' in name:
+                param.data[self.hidden_size:2*self.hidden_size].fill_(1.0)
+    
+    def forward(self, x):
+        batch_size = x.size(0)
+        h0 = torch.zeros(self.num_layers, batch_size, self.hidden_size)
+        c0 = torch.zeros(self.num_layers, batch_size, self.hidden_size)
+        
+        out, _ = self.lstm(x, (h0, c0))
+        out = out[:, -1, :]
+        
+        if self.batch_norm is not None:
+            out = self.batch_norm(out)
+        
+        out = self.dropout(out)
+        out = self.fc(out)
+        return out.squeeze()
+
+# Load the saved model - FIXED VERSION
 @st.cache_resource
 def load_saved_model():
     """Load the saved LSTM model and artifacts"""
     try:
-        # Load the checkpoint
-        checkpoint = torch.load('enhanced_lstm_air_quality_model.pth', 
-                               map_location=torch.device('cpu'))
+        # IMPORTANT: Allow sklearn StandardScaler to be loaded safely
+        torch.serialization.add_safe_globals([StandardScaler])
         
-        # Define the model class (must match your training code)
-        class EnhancedLSTMModel(nn.Module):
-            def __init__(self, input_size, hidden_size, num_layers, output_size, 
-                         dropout_rate=0.3, use_batch_norm=True):
-                super(EnhancedLSTMModel, self).__init__()
-                self.hidden_size = hidden_size
-                self.num_layers = num_layers
-                
-                self.lstm = nn.LSTM(
-                    input_size, hidden_size, num_layers, 
-                    batch_first=True, dropout=dropout_rate if num_layers > 1 else 0.0
-                )
-                
-                self.batch_norm = nn.BatchNorm1d(hidden_size) if use_batch_norm else None
-                self.dropout = nn.Dropout(dropout_rate)
-                self.fc = nn.Linear(hidden_size, output_size)
-                
-                # Initialize LSTM forget gate biases
-                self._init_weights()
-            
-            def _init_weights(self):
-                for name, param in self.named_parameters():
-                    if 'bias' in name and 'lstm' in name:
-                        param.data[self.hidden_size:2*self.hidden_size].fill_(1.0)
-            
-            def forward(self, x):
-                batch_size = x.size(0)
-                h0 = torch.zeros(self.num_layers, batch_size, self.hidden_size)
-                c0 = torch.zeros(self.num_layers, batch_size, self.hidden_size)
-                
-                out, _ = self.lstm(x, (h0, c0))
-                out = out[:, -1, :]
-                
-                if self.batch_norm is not None:
-                    out = self.batch_norm(out)
-                
-                out = self.dropout(out)
-                out = self.fc(out)
-                return out.squeeze()
+        # Load the checkpoint with weights_only=False for compatibility
+        checkpoint = torch.load(
+            'enhanced_lstm_air_quality_model.pth', 
+            map_location=torch.device('cpu'),
+            weights_only=False  # Changed from default True to False
+        )
         
         # Get model config
         model_config = checkpoint['model_config']
@@ -149,21 +154,81 @@ def load_saved_model():
     
     except Exception as e:
         st.error(f"Error loading model: {str(e)}")
+        st.info("Using demo mode with synthetic data.")
         return None
 
-# Load model
+# Alternative loading method using context manager
+def load_model_safely():
+    """Alternative method using safe_globals context manager"""
+    try:
+        from sklearn.preprocessing._data import StandardScaler as SKStandardScaler
+        
+        # Use safe_globals context manager
+        with torch.serialization.safe_globals([SKStandardScaler]):
+            checkpoint = torch.load(
+                'enhanced_lstm_air_quality_model.pth',
+                map_location=torch.device('cpu'),
+                weights_only=True  # Can keep True with safe_globals
+            )
+        
+        # Rest of the loading code...
+        model_config = checkpoint['model_config']
+        
+        model = EnhancedLSTMModel(
+            input_size=model_config['input_size'],
+            hidden_size=model_config['hidden_size'],
+            num_layers=model_config['num_layers'],
+            output_size=model_config['output_size'],
+            dropout_rate=model_config.get('dropout_rate', 0.3),
+            use_batch_norm=model_config.get('use_batch_norm', True)
+        )
+        
+        model.load_state_dict(checkpoint['model_state_dict'])
+        model.eval()
+        
+        # Return the loaded data
+        return {
+            'model': model,
+            'scaler_X': checkpoint['scaler_X'],
+            'scaler_y': checkpoint['scaler_y'],
+            'feature_columns': checkpoint['feature_columns'],
+            'sequence_length': checkpoint['sequence_length'],
+            'train_losses': checkpoint['train_losses'],
+            'val_losses': checkpoint['val_losses'],
+            'learning_rates': checkpoint.get('learning_rates', []),
+            'model_config': model_config
+        }
+        
+    except Exception as e:
+        st.error(f"Alternative loading failed: {str(e)}")
+        return None
+
+# Try loading with the fixed method
+st.sidebar.info("Loading model...")
 data = load_saved_model()
 
 if data is None:
-    st.warning("Could not load model. Using demo mode.")
-    # Create demo data
+    # Try alternative method
+    data = load_model_safely()
+
+if data is None:
+    # Create demo data as fallback
+    st.warning("Using demo mode with synthetic data. Real model could not be loaded.")
     data = {
-        'train_losses': np.random.randn(100).cumsum() + 10,
-        'val_losses': np.random.randn(100).cumsum() + 12,
+        'train_losses': 100 * np.exp(-0.05 * np.arange(100)) + 5,
+        'val_losses': 110 * np.exp(-0.04 * np.arange(100)) + 8,
         'learning_rates': np.linspace(0.001, 0.0001, 100),
         'feature_columns': ['temp', 'humid', 'co2', 'voc', 'pm25', 'pm10', 
                            'hour', 'day', 'month', 'year', 'dayofweek'],
-        'sequence_length': 24
+        'sequence_length': 24,
+        'model_config': {
+            'input_size': 11,
+            'hidden_size': 64,
+            'num_layers': 2,
+            'output_size': 1,
+            'dropout_rate': 0.3,
+            'use_batch_norm': True
+        }
     }
 
 # Page 1: Model Performance
@@ -181,15 +246,16 @@ if page == "📊 Model Performance":
             name='Training Loss',
             line=dict(color='blue', width=3)
         ))
-        fig.add_trace(go.Scatter(
-            y=data['val_losses'],
-            mode='lines',
-            name='Validation Loss',
-            line=dict(color='red', width=3)
-        ))
         
-        # Highlight best epoch
-        if len(data['val_losses']) > 0:
+        if 'val_losses' in data:
+            fig.add_trace(go.Scatter(
+                y=data['val_losses'],
+                mode='lines',
+                name='Validation Loss',
+                line=dict(color='red', width=3)
+            ))
+            
+            # Highlight best epoch
             best_epoch = np.argmin(data['val_losses'])
             best_loss = data['val_losses'][best_epoch]
             fig.add_trace(go.Scatter(
@@ -211,7 +277,7 @@ if page == "📊 Model Performance":
     
     with col2:
         # Learning rate plot
-        if len(data.get('learning_rates', [])) > 0:
+        if 'learning_rates' in data and len(data['learning_rates']) > 0:
             fig2 = go.Figure()
             fig2.add_trace(go.Scatter(
                 y=data['learning_rates'],
@@ -261,7 +327,11 @@ elif page == "📈 Predictions":
         
         # Create synthetic features
         test_data = {}
-        for feature in data['feature_columns']:
+        feature_columns = data.get('feature_columns', 
+            ['temp', 'humid', 'co2', 'voc', 'pm25', 'pm10', 
+             'hour', 'day', 'month', 'year', 'dayofweek'])
+        
+        for feature in feature_columns:
             if feature == 'temp':
                 test_data[feature] = 20 + 10 * np.random.randn(n_samples)
             elif feature == 'humid':
@@ -305,25 +375,26 @@ elif page == "📈 Predictions":
     if st.button("Generate Predictions", type="primary"):
         with st.spinner("Making predictions..."):
             # Create sequences
+            feature_columns = data.get('feature_columns', test_df.columns.tolist())
+            sequence_length = data.get('sequence_length', 24)
+            
             sequences = create_sequences_from_df(
                 test_df, 
-                data['feature_columns'], 
-                data['sequence_length']
+                feature_columns, 
+                sequence_length
             )
             
             if len(sequences) == 0:
-                st.error(f"Need at least {data['sequence_length']} samples for prediction")
+                st.error(f"Need at least {sequence_length} samples for prediction")
             else:
-                # Scale features
-                if 'scaler_X' in data:
+                # Check if we have a real model
+                if 'model' in data and 'scaler_X' in data:
+                    # Scale features
                     sequences_scaled = data['scaler_X'].transform(
                         sequences.reshape(-1, sequences.shape[-1])
                     ).reshape(sequences.shape)
-                else:
-                    sequences_scaled = sequences
-                
-                # Make predictions
-                if 'model' in data:
+                    
+                    # Make predictions
                     model = data['model']
                     predictions = []
                     
@@ -404,89 +475,71 @@ elif page == "🔮 Make Prediction":
     
     st.info("Enter feature values for a single prediction (last 24 hours)")
     
-    # Create input form for sequence
-    if 'feature_columns' in data:
-        # We need sequence_length sets of features
-        sequence_length = data.get('sequence_length', 24)
-        
-        st.markdown(f"**Enter data for {sequence_length} time steps:**")
-        
-        # Create tabs for easier input
-        tabs = st.tabs([f"T-{i}" for i in range(sequence_length-1, -1, -1)])
-        
-        sequence_data = []
-        
-        for i, tab in enumerate(tabs):
-            with tab:
-                st.markdown(f"**Time Step T-{sequence_length-1-i}**")
-                row_data = {}
-                
-                # Create 2 columns for features
-                col1, col2 = st.columns(2)
-                
-                features = data['feature_columns']
-                half = len(features) // 2
-                
-                with col1:
-                    for feature in features[:half]:
-                        if feature in ['temp', 'humid', 'co2', 'voc', 'pm25', 'pm10']:
-                            row_data[feature] = st.number_input(
-                                f"{feature}",
-                                value=25.0 if feature == 'temp' else 
-                                      60.0 if feature == 'humid' else
-                                      500.0 if feature == 'co2' else
-                                      0.3 if feature == 'voc' else
-                                      15.0 if feature == 'pm25' else 25.0,
-                                key=f"{feature}_{i}"
-                            )
-                        elif feature == 'hour':
-                            row_data[feature] = st.slider(
-                                "Hour", 0, 23, 12, key=f"hour_{i}"
-                            )
-                
-                with col2:
-                    for feature in features[half:]:
-                        if feature == 'day':
-                            row_data[feature] = st.slider(
-                                "Day", 1, 31, 15, key=f"day_{i}"
-                            )
-                        elif feature == 'month':
-                            row_data[feature] = st.slider(
-                                "Month", 1, 12, 3, key=f"month_{i}"
-                            )
-                        elif feature == 'year':
-                            row_data[feature] = st.number_input(
-                                "Year", 2023, 2025, 2024, key=f"year_{i}"
-                            )
-                        elif feature == 'dayofweek':
-                            row_data[feature] = st.selectbox(
-                                "Day of Week",
-                                ["Monday", "Tuesday", "Wednesday", "Thursday", 
-                                 "Friday", "Saturday", "Sunday"],
-                                index=4,
-                                key=f"dayofweek_{i}"
-                            )
-                
-                sequence_data.append(row_data)
-        
-        if st.button("Predict Next Hour", type="primary"):
-            with st.spinner("Processing..."):
-                # Convert to sequence
-                sequence_df = pd.DataFrame(sequence_data)
-                
-                # Convert dayofweek to numeric
-                if 'dayofweek' in sequence_df.columns:
-                    day_map = {"Monday": 0, "Tuesday": 1, "Wednesday": 2, 
-                              "Thursday": 3, "Friday": 4, "Saturday": 5, "Sunday": 6}
-                    sequence_df['dayofweek'] = sequence_df['dayofweek'].map(day_map)
-                
-                # Ensure correct column order
-                sequence_df = sequence_df[data['feature_columns']]
-                
-                # Scale and predict
-                sequence_array = sequence_df.values
-                
-                if 'scaler_X' in data and 'model' in data:
+    # Get feature columns and sequence length
+    feature_columns = data.get('feature_columns', 
+        ['temp', 'humid', 'co2', 'voc', 'pm25', 'pm10', 
+         'hour', 'day', 'month', 'year', 'dayofweek'])
+    sequence_length = data.get('sequence_length', 24)
+    
+    st.markdown(f"**Enter data for {sequence_length} time steps:**")
+    
+    # Create a simplified input form (just last time step for demo)
+    st.markdown("### Enter Current Conditions")
+    
+    col1, col2 = st.columns(2)
+    
+    input_data = {}
+    
+    with col1:
+        input_data['temp'] = st.number_input("Temperature (°C)", 15.0, 35.0, 25.0, 0.5)
+        input_data['humid'] = st.number_input("Humidity (%)", 30.0, 90.0, 60.0, 1.0)
+        input_data['co2'] = st.number_input("CO₂ (ppm)", 300.0, 1500.0, 500.0, 10.0)
+        input_data['voc'] = st.number_input("VOC", 0.1, 1.0, 0.3, 0.05)
+    
+    with col2:
+        input_data['pm25'] = st.number_input("PM2.5 (µg/m³)", 5.0, 100.0, 15.0, 1.0)
+        input_data['pm10'] = st.number_input("PM10 (µg/m³)", 10.0, 200.0, 25.0, 1.0)
+        input_data['hour'] = st.slider("Hour", 0, 23, 14)
+        input_data['dayofweek'] = st.selectbox("Day of Week", 
+            ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"],
+            index=4)
+    
+    input_data['day'] = st.slider("Day", 1, 31, 15)
+    input_data['month'] = st.slider("Month", 1, 12, 3)
+    input_data['year'] = 2024
+    
+    if st.button("Predict Next Hour", type="primary"):
+        with st.spinner("Processing..."):
+            # Convert dayofweek to numeric
+            day_map = {"Monday": 0, "Tuesday": 1, "Wednesday": 2, 
+                      "Thursday": 3, "Friday": 4, "Saturday": 5, "Sunday": 6}
+            input_data['dayofweek'] = day_map[input_data['dayofweek']]
+            
+            # Create a sequence (replicate current values for simplicity)
+            sequence = []
+            for i in range(sequence_length):
+                # Create slight variations for demo
+                seq_point = {}
+                for key, value in input_data.items():
+                    if key in ['temp', 'humid', 'co2', 'voc', 'pm25', 'pm10']:
+                        # Add small variations
+                        variation = value * (1 + np.random.normal(0, 0.05))
+                        seq_point[key] = variation
+                    elif key == 'hour':
+                        # Adjust hour for each time step
+                        hour_val = (input_data['hour'] - (sequence_length - 1 - i)) % 24
+                        seq_point[key] = hour_val
+                    else:
+                        seq_point[key] = value
+                sequence.append(seq_point)
+            
+            # Convert to array
+            sequence_df = pd.DataFrame(sequence)
+            sequence_array = sequence_df[feature_columns].values
+            
+            # Make prediction
+            if 'model' in data and 'scaler_X' in data:
+                try:
                     # Scale
                     sequence_scaled = data['scaler_X'].transform(sequence_array)
                     sequence_scaled = sequence_scaled.reshape(1, sequence_length, -1)
@@ -501,66 +554,82 @@ elif page == "🔮 Make Prediction":
                         prediction = data['scaler_y'].inverse_transform(
                             np.array([[prediction]])
                         ).item()
-                else:
-                    # Demo prediction
-                    prediction = 50 + np.mean(sequence_df['temp']) * 0.5
-                    prediction += np.mean(sequence_df['pm25']) * 0.8
-                
-                # Display result
-                st.markdown("---")
-                st.markdown("### Prediction Result")
-                
-                # Determine category
-                if prediction <= 50:
-                    category = "🟢 Excellent"
-                    color = "green"
-                elif prediction <= 100:
-                    category = "🟡 Good"
-                    color = "orange"
-                elif prediction <= 150:
-                    category = "🟠 Moderate"
-                    color = "darkorange"
-                elif prediction <= 200:
-                    category = "🔴 Unhealthy"
-                    color = "red"
-                else:
-                    category = "⚫ Hazardous"
-                    color = "black"
-                
-                col_pred1, col_pred2 = st.columns(2)
-                with col_pred1:
-                    st.markdown(f"""
-                    <div style='text-align: center; padding: 2rem; background-color: #f8f9fa; border-radius: 10px;'>
-                        <h3>Predicted Air Quality</h3>
-                        <h1 style='color: {color}; font-size: 4rem;'>{prediction:.1f}</h1>
-                        <h3 style='color: {color};'>{category}</h3>
-                    </div>
-                    """, unsafe_allow_html=True)
-                
-                with col_pred2:
-                    st.markdown("### Feature Importance")
-                    # Simple feature importance (for demo)
-                    feature_importance = {
-                        'Temperature': abs(sequence_df['temp'].mean() - 25),
-                        'Humidity': abs(sequence_df['humid'].mean() - 60),
-                        'PM2.5': sequence_df['pm25'].mean() * 0.1,
-                        'CO2': sequence_df['co2'].mean() * 0.01,
-                        'Time of Day': abs(sequence_df['hour'].mean() - 12) * 0.5
-                    }
                     
-                    fig = go.Figure(data=[
-                        go.Bar(
-                            x=list(feature_importance.keys()),
-                            y=list(feature_importance.values()),
-                            marker_color='lightblue'
-                        )
-                    ])
-                    fig.update_layout(
-                        title='Factors Affecting Prediction',
-                        height=300,
-                        showlegend=False
+                    prediction_source = "Real LSTM Model"
+                    
+                except Exception as e:
+                    st.warning(f"Model prediction failed: {str(e)}. Using demo calculation.")
+                    prediction = 50 + input_data['temp'] * 0.5 - input_data['humid'] * 0.2
+                    prediction += input_data['pm25'] * 0.8 + input_data['co2'] * 0.01
+                    prediction_source = "Demo Calculation"
+            else:
+                # Demo prediction
+                prediction = 50 + input_data['temp'] * 0.5 - input_data['humid'] * 0.2
+                prediction += input_data['pm25'] * 0.8 + input_data['co2'] * 0.01
+                prediction_source = "Demo Calculation"
+            
+            # Display result
+            st.markdown("---")
+            st.markdown("### Prediction Result")
+            
+            # Determine category
+            if prediction <= 50:
+                category = "🟢 Excellent"
+                color = "green"
+                advice = "Air quality is excellent. Perfect for outdoor activities."
+            elif prediction <= 100:
+                category = "🟡 Good"
+                color = "orange"
+                advice = "Air quality is good. Suitable for outdoor activities."
+            elif prediction <= 150:
+                category = "🟠 Moderate"
+                color = "darkorange"
+                advice = "Air quality is moderate. Sensitive groups should limit exposure."
+            elif prediction <= 200:
+                category = "🔴 Unhealthy"
+                color = "red"
+                advice = "Air quality is unhealthy. Limit outdoor activities."
+            else:
+                category = "⚫ Hazardous"
+                color = "black"
+                advice = "Air quality is hazardous. Avoid outdoor activities."
+            
+            col_pred1, col_pred2 = st.columns(2)
+            with col_pred1:
+                st.markdown(f"""
+                <div style='text-align: center; padding: 2rem; background-color: #f8f9fa; border-radius: 10px;'>
+                    <h3>Predicted Air Quality</h3>
+                    <h1 style='color: {color}; font-size: 4rem;'>{prediction:.1f}</h1>
+                    <h3 style='color: {color};'>{category}</h3>
+                    <p>{advice}</p>
+                    <p><small>Source: {prediction_source}</small></p>
+                </div>
+                """, unsafe_allow_html=True)
+            
+            with col_pred2:
+                st.markdown("### Key Factors")
+                factors = {
+                    'Temperature': input_data['temp'] * 0.5,
+                    'Humidity': -input_data['humid'] * 0.2,
+                    'PM2.5': input_data['pm25'] * 0.8,
+                    'CO₂': input_data['co2'] * 0.01,
+                    'Time of Day': abs(input_data['hour'] - 12) * 0.3
+                }
+                
+                # Create bar chart
+                fig = go.Figure(data=[
+                    go.Bar(
+                        x=list(factors.keys()),
+                        y=list(factors.values()),
+                        marker_color=['blue', 'green', 'red', 'purple', 'orange']
                     )
-                    st.plotly_chart(fig, use_container_width=True)
+                ])
+                fig.update_layout(
+                    title='Feature Contributions',
+                    height=300,
+                    showlegend=False
+                )
+                st.plotly_chart(fig, use_container_width=True)
 
 # Page 4: Model Info
 else:
@@ -582,61 +651,50 @@ else:
         
         with col_info2:
             st.markdown("### Training Parameters")
-            if 'training_params' in data.get('model_config', {}):
-                params = data['model_config']['training_params']
-                for key, value in params.items():
-                    st.write(f"**{key}**: {value}")
-            else:
-                st.write("**Batch Size**: 32")
-                st.write("**Learning Rate**: 0.001")
-                st.write("**Weight Decay**: 0.01")
-                st.write("**Sequence Length**: 24")
+            st.write(f"**Sequence Length**: {data.get('sequence_length', 24)}")
+            st.write(f"**Training Epochs**: {len(data.get('train_losses', []))}")
+            if 'val_losses' in data and len(data['val_losses']) > 0:
+                st.write(f"**Best Validation Loss**: {min(data['val_losses']):.4f}")
     
     st.markdown("---")
-    st.markdown("### Feature Information")
+    st.markdown("### Model Status")
     
-    if 'feature_columns' in data:
-        features_df = pd.DataFrame({
-            'Feature': data['feature_columns'],
-            'Description': [
-                'Temperature in Celsius',
-                'Humidity percentage',
-                'CO2 concentration in ppm',
-                'Volatile Organic Compounds',
-                'PM2.5 particle concentration',
-                'PM10 particle concentration',
-                'Hour of day (0-23)',
-                'Day of month',
-                'Month (1-12)',
-                'Year',
-                'Day of week (0-6)'
-            ],
-            'Type': [
-                'Continuous', 'Continuous', 'Continuous', 'Continuous',
-                'Continuous', 'Continuous', 'Categorical', 'Categorical',
-                'Categorical', 'Categorical', 'Categorical'
-            ]
-        })
-        st.dataframe(features_df, use_container_width=True, hide_index=True)
+    if 'model' in data:
+        st.success("✅ Real LSTM model loaded successfully")
+        st.info("The dashboard is using your trained LSTM model for predictions.")
+    else:
+        st.warning("⚠️ Demo mode active")
+        st.info("The dashboard is using synthetic data and calculations. Make sure your model file ('enhanced_lstm_air_quality_model.pth') is in the same directory.")
     
     st.markdown("---")
-    st.markdown("### Usage Instructions")
+    st.markdown("### Troubleshooting")
     
-    with st.expander("How to use this dashboard"):
+    with st.expander("Having issues loading the model?"):
         st.markdown("""
-        1. **Model Performance**: View training history and metrics
-        2. **Predictions**: Upload CSV data or use synthetic data for batch predictions
-        3. **Make Prediction**: Enter feature values for a single prediction
-        4. **Model Info**: View model architecture and feature information
+        **Common issues and solutions:**
         
-        **Note**: The model uses sequences of 24 time steps to predict the next hour's air quality.
+        1. **File not found**: Make sure `enhanced_lstm_air_quality_model.pth` is in the same folder as `app.py`
+        
+        2. **PyTorch version mismatch**: Try:
+           ```bash
+           pip install torch==2.0.0
+           ```
+        
+        3. **Security restrictions**: The app should handle PyTorch 2.6+ security restrictions automatically
+        
+        4. **Model architecture mismatch**: Ensure the model class in `app.py` matches your training code
+        
+        **For deployment to Streamlit Cloud:**
+        - Make sure all files are committed to GitHub
+        - Check that `requirements.txt` includes all dependencies
+        - The model file might be large (>100MB), consider compressing or using a different storage method
         """)
 
 # Footer
 st.markdown("---")
 st.markdown(
     "<div style='text-align: center; color: #666;'>"
-    "Air Quality LSTM Dashboard | Powered by Streamlit | Model: Enhanced LSTM"
+    "Air Quality LSTM Dashboard | Powered by Streamlit"
     "</div>",
     unsafe_allow_html=True
 )
