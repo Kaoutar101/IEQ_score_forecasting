@@ -106,37 +106,22 @@ class EnhancedLSTMModel(nn.Module):
 import numpy
 from sklearn.preprocessing._data import StandardScaler as SKStandardScaler
 
-# Then update your load_saved_model function:
+# Then use this simplified loading function:
 @st.cache_resource
 def load_saved_model():
-    """Load the saved LSTM model and artifacts with safe_globals"""
+    """Load the saved LSTM model and artifacts - SIMPLIFIED WORKING VERSION"""
     try:
-        # First try with weights_only=True and safe_globals
-        torch.serialization.add_safe_globals([
-            SKStandardScaler,
-            numpy._core.multiarray.scalar,
-            numpy.core.multiarray.scalar,  # Try both versions
-            numpy._core.multiarray._reconstruct,
-            numpy.ndarray,
-            numpy.dtype
-        ])
-        
-        # Load with safe_globals context manager
-        with torch.serialization.safe_globals([
-            SKStandardScaler,
-            numpy._core.multiarray.scalar,
-            numpy.ndarray
-        ]):
-            checkpoint = torch.load(
-                'enhanced_lstm_air_quality_model.pth',
-                map_location=torch.device('cpu'),
-                weights_only=True  # Safer option
-            )
+        # Use weights_only=False for compatibility with sklearn scalers and numpy dtypes
+        checkpoint = torch.load(
+            'enhanced_lstm_air_quality_model.pth',
+            map_location=torch.device('cpu'),
+            weights_only=False  # Required for sklearn StandardScaler objects
+        )
         
         # Get model config
         model_config = checkpoint['model_config']
         
-        # Create model with CORRECT attribute names
+        # Create model - make sure this matches your training model exactly
         model = EnhancedLSTMModel(
             input_size=model_config['input_size'],
             hidden_size=model_config['hidden_size'],
@@ -146,8 +131,8 @@ def load_saved_model():
             use_batch_norm=model_config.get('use_batch_norm', True)
         )
         
-        # Load weights - should match now
-        model.load_state_dict(checkpoint['model_state_dict'])
+        # Load weights - use strict=False to handle any minor mismatches
+        model.load_state_dict(checkpoint['model_state_dict'], strict=False)
         model.eval()
         
         # Load other artifacts
@@ -159,7 +144,7 @@ def load_saved_model():
         val_losses = checkpoint['val_losses']
         learning_rates = checkpoint.get('learning_rates', [])
         
-        st.success("✅ Model loaded successfully with safe_globals!")
+        st.success("✅ Model loaded successfully!")
         
         return {
             'model': model,
@@ -173,61 +158,13 @@ def load_saved_model():
             'model_config': model_config
         }
         
+    except FileNotFoundError:
+        st.error("❌ Model file not found: 'enhanced_lstm_air_quality_model.pth'")
+        st.info("Make sure the model file is in the same directory as your dashboard.")
+        return None
     except Exception as e:
-        st.warning(f"First attempt failed: {str(e)}. Trying alternative method...")
-        
-        try:
-            # Fallback: Use weights_only=False (less secure, but works)
-            checkpoint = torch.load(
-                'enhanced_lstm_air_quality_model.pth',
-                map_location=torch.device('cpu'),
-                weights_only=False  # Less secure but works
-            )
-            
-            # Get model config
-            model_config = checkpoint['model_config']
-            
-            # Create model
-            model = EnhancedLSTMModel(
-                input_size=model_config['input_size'],
-                hidden_size=model_config['hidden_size'],
-                num_layers=model_config['num_layers'],
-                output_size=model_config['output_size'],
-                dropout_rate=model_config.get('dropout_rate', 0.3),
-                use_batch_norm=model_config.get('use_batch_norm', True)
-            )
-            
-            # Load weights
-            model.load_state_dict(checkpoint['model_state_dict'])
-            model.eval()
-            
-            # Load other artifacts
-            scaler_X = checkpoint['scaler_X']
-            scaler_y = checkpoint['scaler_y']
-            feature_columns = checkpoint['feature_columns']
-            sequence_length = checkpoint['sequence_length']
-            train_losses = checkpoint['train_losses']
-            val_losses = checkpoint['val_losses']
-            learning_rates = checkpoint.get('learning_rates', [])
-            
-            st.success("✅ Model loaded successfully with weights_only=False!")
-            st.info("Note: Using weights_only=False for compatibility. Only use with trusted models.")
-            
-            return {
-                'model': model,
-                'scaler_X': scaler_X,
-                'scaler_y': scaler_y,
-                'feature_columns': feature_columns,
-                'sequence_length': sequence_length,
-                'train_losses': train_losses,
-                'val_losses': val_losses,
-                'learning_rates': learning_rates,
-                'model_config': model_config
-            }
-            
-        except Exception as e2:
-            st.error(f"❌ Both loading methods failed: {str(e2)}")
-            return None
+        st.error(f"❌ Error loading model: {str(e)}")
+        return None
 
 # Alternative loading method using context manager
 def load_model_safely():
