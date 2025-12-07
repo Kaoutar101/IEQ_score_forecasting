@@ -104,14 +104,11 @@ class EnhancedLSTMModel(nn.Module):
 def load_saved_model():
     """Load the saved LSTM model and artifacts"""
     try:
-        # IMPORTANT: Allow sklearn StandardScaler to be loaded safely
-        torch.serialization.add_safe_globals([StandardScaler])
-        
-        # Load the checkpoint with weights_only=False for compatibility
+        # Load with weights_only=False for compatibility
         checkpoint = torch.load(
             'enhanced_lstm_air_quality_model.pth', 
             map_location=torch.device('cpu'),
-            weights_only=False  # Changed from default True to False
+            weights_only=False
         )
         
         # Get model config
@@ -140,6 +137,8 @@ def load_saved_model():
         val_losses = checkpoint['val_losses']
         learning_rates = checkpoint.get('learning_rates', [])
         
+        st.success("✅ Model loaded successfully!")
+        
         return {
             'model': model,
             'scaler_X': scaler_X,
@@ -152,10 +151,14 @@ def load_saved_model():
             'model_config': model_config
         }
     
-    except Exception as e:
-        st.error(f"Error loading model: {str(e)}")
-        st.info("Using demo mode with synthetic data.")
+    except FileNotFoundError:
+        st.error("❌ Model file not found: 'enhanced_lstm_air_quality_model.pth'")
+        st.info("Make sure the model file is in the same directory as your dashboard app.")
         return None
+    except Exception as e:
+        st.error(f"❌ Error loading model: {str(e)}")
+        return None
+
 
 # Alternative loading method using context manager
 def load_model_safely():
