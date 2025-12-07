@@ -118,6 +118,66 @@ st.markdown("""
 # Title
 st.markdown('<h1 class="main-header">Air Quality Forecasting System</h1>', unsafe_allow_html=True)
 
+# ==================== SCORE TRANSFORMATION FUNCTIONS ====================
+def transform_to_intuitive_score(raw_score):
+    """
+    Transform raw model predictions to intuitive scores (0-100 scale)
+    Higher score = Better air quality
+    Assuming raw scores are in 0-100 range but inverted
+    """
+    # Method 1: Simple inversion if scores are already in 0-100
+    # intuitive_score = 100 - raw_score
+    
+    # Method 2: Scale and shift to make "good" = 80-100
+    # This assumes your model predicts ~20-40 for good air quality
+    if raw_score < 20:
+        intuitive_score = 95 + (raw_score * 0.25)  # 0-19 → 95-100
+    elif raw_score < 40:
+        intuitive_score = 85 + ((raw_score - 20) * 0.5)  # 20-39 → 85-95
+    elif raw_score < 60:
+        intuitive_score = 70 + ((raw_score - 40) * 0.75)  # 40-59 → 70-85
+    elif raw_score < 80:
+        intuitive_score = 50 + ((raw_score - 60) * 1.0)  # 60-79 → 50-70
+    else:
+        intuitive_score = 30 + ((raw_score - 80) * 1.0)  # 80-100 → 30-50
+    
+    # Ensure the score is within 0-100 range
+    intuitive_score = max(0, min(100, intuitive_score))
+    
+    return round(intuitive_score, 1)
+
+def get_air_quality_category(score):
+    """Get air quality category based on intuitive score"""
+    if score >= 90:
+        return "Excellent", "#27AE60"  # Green
+    elif score >= 80:
+        return "Very Good", "#2ECC71"  # Light Green
+    elif score >= 70:
+        return "Good", "#F1C40F"  # Yellow
+    elif score >= 60:
+        return "Fair", "#F39C12"  # Orange
+    elif score >= 50:
+        return "Moderate", "#E67E22"  # Dark Orange
+    elif score >= 40:
+        return "Poor", "#E74C3C"  # Red
+    else:
+        return "Very Poor", "#C0392B"  # Dark Red
+
+def get_health_recommendation(score):
+    """Get health recommendation based on intuitive score"""
+    if score >= 80:
+        return "Ideal for all outdoor activities"
+    elif score >= 70:
+        return "Good for outdoor activities"
+    elif score >= 60:
+        return "Generally acceptable for outdoor activities"
+    elif score >= 50:
+        return "Sensitive groups should reduce prolonged outdoor exposure"
+    elif score >= 40:
+        return "Limit prolonged outdoor activities"
+    else:
+        return "Avoid outdoor activities, especially for sensitive groups"
+
 # ==================== MODEL LOADING FUNCTION ====================
 @st.cache_resource
 def load_saved_model():
@@ -175,13 +235,13 @@ def load_saved_model():
         st.error(f"❌ Error loading model: {str(e)}")
         return None
 
-# ==================== HELPER FUNCTIONS ====================
+# ==================== FORECASTING FUNCTIONS ====================
 def generate_5min_forecast(model, initial_sequence, scaler_X, scaler_y, feature_columns, horizon=12):
     """
     Generate multi-step forecast with 5-minute intervals
     horizon: number of 5-minute intervals to forecast
     """
-    predictions = []
+    raw_predictions = []
     current_sequence = initial_sequence.copy()
     
     with torch.no_grad():
@@ -196,8 +256,8 @@ def generate_5min_forecast(model, initial_sequence, scaler_X, scaler_y, feature_
             pred_scaled = model(seq_tensor).item()
             
             # Inverse transform prediction
-            pred = scaler_y.inverse_transform(np.array([[pred_scaled]])).item()
-            predictions.append(pred)
+            raw_pred = scaler_y.inverse_transform(np.array([[pred_scaled]])).item()
+            raw_predictions.append(raw_pred)
             
             # Update sequence for next step
             new_row = current_sequence[-1].copy()
@@ -208,21 +268,28 @@ def generate_5min_forecast(model, initial_sequence, scaler_X, scaler_y, feature_
                 minute_increment = (step + 1) * 5 / 60  # 5 minutes in hours
                 new_row[hour_idx] = (new_row[hour_idx] + minute_increment) % 24
             
-            # Add some variation to make forecasts more realistic
-            for i in range(len(feature_columns)):
-                if feature_columns[i] in ['temp', 'humid', 'co2']:
-                    # Add small random variations
-                    new_row[i] += np.random.normal(0, 0.1)
+            # Add realistic variation
+            for i, feature in enumerate(feature_columns):
+                if feature in ['temp', 'humid', 'co2', 'pm25', 'pm10']:
+                    # Small random variations
+                    variation = np.random.normal(0, 0.05)
+                    new_row[i] *= (1 + variation)
             
             current_sequence = np.roll(current_sequence, -1, axis=0)
             current_sequence[-1] = new_row
     
-    return predictions
+    # Transform raw predictions to intuitive scores
+    intuitive_predictions = [transform_to_intuitive_score(p) for p in raw_predictions]
+    
+    return intuitive_predictions, raw_predictions
 
 def create_sample_data(feature_columns, sequence_length):
-    """Create more realistic sample sequence"""
+    """Create realistic sample sequence"""
     np.random.seed(42)
     sample_sequence = np.zeros((sequence_length, len(feature_columns)))
+    
+    # Base values for realistic data
+    base_hours = np.linspace(8, 12, sequence_length)  # Morning hours
     
     for i, feature in enumerate(feature_columns):
         if feature == 'temp':
@@ -230,9 +297,9 @@ def create_sample_data(feature_columns, sequence_length):
         elif feature == 'humid':
             sample_sequence[:, i] = 60 + 10 * np.cos(np.linspace(0, 2*np.pi, sequence_length))
         elif feature == 'pm25':
-            sample_sequence[:, i] = 20 + 8 * np.sin(np.linspace(0, 2*np.pi, sequence_length))
+            sample_sequence[:, i] = 15 + 8 * np.sin(np.linspace(0, 2*np.pi, sequence_length))
         elif feature == 'hour':
-            sample_sequence[:, i] = np.linspace(8, 12, sequence_length) % 24
+            sample_sequence[:, i] = base_hours % 24
         elif feature == 'co2':
             sample_sequence[:, i] = 400 + 100 * np.sin(np.linspace(0, 2*np.pi, sequence_length))
         elif feature == 'voc':
@@ -281,40 +348,61 @@ with st.spinner("Loading forecasting model..."):
 if page == "Dashboard Overview":
     st.markdown('<h2 class="sub-header">Real-time Monitoring Dashboard</h2>', unsafe_allow_html=True)
     
+    # Score explanation
+    with st.expander("📊 Understanding the Air Quality Score (0-100 scale)"):
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.markdown("""
+            **Score Ranges & Categories:**
+            
+            - **90-100**: Excellent 🌟
+            - **80-89**: Very Good 👍
+            - **70-79**: Good ✅
+            - **60-69**: Fair ⚠️
+            - **50-59**: Moderate 🔶
+            - **40-49**: Poor ❌
+            - **0-39**: Very Poor 🚫
+            
+            **Higher scores = Better air quality**
+            """)
+        
+        with col2:
+            st.markdown("""
+            **Health Recommendations:**
+            
+            - **80+**: Ideal for all outdoor activities
+            - **70-79**: Good for outdoor activities
+            - **60-69**: Generally acceptable
+            - **50-59**: Sensitive groups should reduce exposure
+            - **40-49**: Limit prolonged outdoor activities
+            - **<40**: Avoid outdoor activities
+            """)
+    
     # Key metrics row
+    st.markdown('<h3 class="sub-header">Current Conditions</h3>', unsafe_allow_html=True)
+    
     col1, col2, col3, col4 = st.columns(4)
     
     with col1:
         st.markdown('<div class="metric-card">', unsafe_allow_html=True)
-        st.metric("Current Score", "85", "▲ 2.3")
+        st.metric("Current Score", "85", "▲ 2.3", delta_color="normal")
         st.markdown('</div>', unsafe_allow_html=True)
     
     with col2:
         st.markdown('<div class="metric-card">', unsafe_allow_html=True)
-        st.metric("PM2.5 Level", "24 μg/m³", "▼ 1.2")
+        st.metric("PM2.5", "24 μg/m³", "▼ 1.2", delta_color="inverse")
         st.markdown('</div>', unsafe_allow_html=True)
     
     with col3:
         st.markdown('<div class="metric-card">', unsafe_allow_html=True)
-        st.metric("Temperature", "22.5°C", "▲ 0.5")
+        st.metric("Temperature", "22.5°C", "▲ 0.5", delta_color="off")
         st.markdown('</div>', unsafe_allow_html=True)
     
     with col4:
         st.markdown('<div class="metric-card">', unsafe_allow_html=True)
-        st.metric("Humidity", "65%", "▼ 3")
+        st.metric("Humidity", "65%", "▼ 3", delta_color="inverse")
         st.markdown('</div>', unsafe_allow_html=True)
-    
-    # Information box
-    with st.expander("Understanding the Scores"):
-        st.markdown("""
-        **Score Interpretation:**
-        
-        - **0-50**: Good air quality - Normal outdoor activities are safe
-        - **51-100**: Moderate air quality - Sensitive groups should limit exposure
-        - **101+**: Poor air quality - Limit outdoor activities
-        
-        *Note: These scores represent predicted air quality based on sensor data.*
-        """)
     
     # Main forecasting section
     st.markdown('<h2 class="sub-header">5-Minute Interval Forecast</h2>', unsafe_allow_html=True)
@@ -330,7 +418,7 @@ if page == "Dashboard Overview":
             )
             
             # Generate forecasts
-            forecasts = generate_5min_forecast(
+            forecasts, raw_forecasts = generate_5min_forecast(
                 data['model'],
                 sample_sequence,
                 data['scaler_X'],
@@ -339,18 +427,20 @@ if page == "Dashboard Overview":
                 horizon=forecast_horizon
             )
             
-            # Add variation to make forecasts more realistic
-            if len(forecasts) > 1:
-                # Add trend and noise
-                base_trend = np.linspace(0, 5, len(forecasts))  # Slight upward trend
-                noise = np.random.normal(0, 2, len(forecasts))  # Small random variations
-                forecasts = [f + t + n for f, t, n in zip(forecasts, base_trend, noise)]
-            
             # Create time labels for 5-minute intervals
             time_labels = [f"+{i*5}min" for i in range(1, forecast_horizon + 1)]
             
-            # Create forecast plot
+            # Create forecast plot with color coding
             fig = go.Figure()
+            
+            # Add colored background zones
+            fig.add_hrect(y0=0, y1=40, line_width=0, fillcolor="rgba(192, 57, 43, 0.1)", opacity=0.2)
+            fig.add_hrect(y0=40, y1=50, line_width=0, fillcolor="rgba(231, 76, 60, 0.1)", opacity=0.2)
+            fig.add_hrect(y0=50, y1=60, line_width=0, fillcolor="rgba(230, 126, 34, 0.1)", opacity=0.2)
+            fig.add_hrect(y0=60, y1=70, line_width=0, fillcolor="rgba(243, 156, 18, 0.1)", opacity=0.2)
+            fig.add_hrect(y0=70, y1=80, line_width=0, fillcolor="rgba(241, 196, 15, 0.1)", opacity=0.2)
+            fig.add_hrect(y0=80, y1=90, line_width=0, fillcolor="rgba(46, 204, 113, 0.1)", opacity=0.2)
+            fig.add_hrect(y0=90, y1=100, line_width=0, fillcolor="rgba(39, 174, 96, 0.1)", opacity=0.2)
             
             # Forecast line
             fig.add_trace(go.Scatter(
@@ -359,17 +449,18 @@ if page == "Dashboard Overview":
                 mode='lines+markers',
                 name='Forecast',
                 line=dict(color='#3498DB', width=3),
-                marker=dict(size=8)
+                marker=dict(size=8, color=forecasts, colorscale='RdYlGn', showscale=False, cmin=0, cmax=100)
             ))
             
             fig.update_layout(
                 title=f'Air Quality Score Forecast (Next {forecast_horizon*5} minutes)',
                 xaxis_title='Time Ahead',
-                yaxis_title='Air Quality Score',
+                yaxis_title='Air Quality Score (0-100)',
+                yaxis_range=[0, 100],
                 height=500,
                 template='plotly_white',
                 hovermode='x unified',
-                showlegend=True,
+                showlegend=False,
                 plot_bgcolor='rgba(240, 240, 240, 0.5)'
             )
             
@@ -383,39 +474,65 @@ if page == "Dashboard Overview":
                 avg_forecast = np.mean(forecasts)
                 max_forecast = np.max(forecasts)
                 min_forecast = np.min(forecasts)
-                trend = "increasing" if forecasts[-1] > forecasts[0] else "decreasing"
+                trend = "improving" if forecasts[-1] > forecasts[0] else "deteriorating"
                 
-                st.metric("Average Score", f"{avg_forecast:.1f}")
+                avg_category, avg_color = get_air_quality_category(avg_forecast)
+                
+                st.metric("Average Score", f"{avg_forecast:.1f}", f"{avg_category}")
                 st.metric("Peak Score", f"{max_forecast:.1f}")
                 st.metric("Minimum Score", f"{min_forecast:.1f}")
                 st.metric("Trend", f"{trend.capitalize()}")
                 
-                # Determine alert level based on your scoring system
-                if max_forecast > 100:
-                    st.warning("⚠️ Alert: Poor air quality predicted")
-                elif max_forecast > 50:
-                    st.info("ℹ️ Moderate air quality expected")
+                # Overall assessment
+                st.markdown("---")
+                if min_forecast >= 70:
+                    st.success("✅ **Overall Assessment:** Good air quality expected")
+                elif min_forecast >= 50:
+                    st.info("ℹ️ **Overall Assessment:** Moderate air quality expected")
                 else:
-                    st.success("✅ Good air quality expected")
+                    st.warning("⚠️ **Overall Assessment:** Poor air quality periods expected")
             
             st.markdown('</div>', unsafe_allow_html=True)
         
         # Detailed forecast table
         st.markdown('<h3 class="sub-header">Detailed Forecast Table</h3>', unsafe_allow_html=True)
         
-        forecast_df = pd.DataFrame({
-            'Time Ahead': time_labels,
-            'Air Quality Score': [f"{x:.1f}" for x in forecasts],
-            'Category': ['Good' if x <= 50 else 'Moderate' if x <= 100 else 'Poor' for x in forecasts],
-            'Recommendation': [
-                'Normal outdoor activities' if x <= 50 
-                else 'Sensitive groups limit exposure' if x <= 100 
-                else 'Limit outdoor activities' 
-                for x in forecasts
-            ]
-        })
+        # Create dataframe with transformed scores
+        table_data = []
+        for i, (time, score) in enumerate(zip(time_labels, forecasts)):
+            category, color = get_air_quality_category(score)
+            recommendation = get_health_recommendation(score)
+            table_data.append({
+                'Time Ahead': time,
+                'Air Quality Score': f"{score:.1f}",
+                'Category': category,
+                'Health Advisory': recommendation
+            })
         
-        st.dataframe(forecast_df, use_container_width=True, height=400)
+        forecast_df = pd.DataFrame(table_data)
+        
+        # Display styled dataframe
+        st.dataframe(
+            forecast_df,
+            use_container_width=True,
+            height=400,
+            column_config={
+                "Time Ahead": st.column_config.TextColumn("Time Ahead", width="small"),
+                "Air Quality Score": st.column_config.NumberColumn("Score", format="%.1f", width="small"),
+                "Category": st.column_config.TextColumn("Category", width="medium"),
+                "Health Advisory": st.column_config.TextColumn("Recommendation", width="large")
+            }
+        )
+        
+        # Download button for forecasts
+        if st.button("📥 Download Forecast Data"):
+            csv = forecast_df.to_csv(index=False)
+            st.download_button(
+                label="Download CSV",
+                data=csv,
+                file_name="air_quality_forecast.csv",
+                mime="text/csv"
+            )
     else:
         st.warning("Model not loaded. Forecast functionality unavailable.")
         st.info("Make sure 'enhanced_lstm_air_quality_model.pth' is in the current directory.")
@@ -444,16 +561,17 @@ elif page == "Forecast Analysis":
         )
         
         # Plot 2: Score distribution
-        sample_scores = np.random.normal(60, 20, 1000)
+        sample_scores = np.random.normal(70, 15, 1000)
+        sample_scores = np.clip(sample_scores, 0, 100)
         fig.add_trace(
-            go.Histogram(x=sample_scores, nbinsx=30, name='Distribution',
+            go.Histogram(x=sample_scores, nbinsx=20, name='Distribution',
                         marker_color='#3498DB'),
             row=1, col=2
         )
         
         # Plot 3: Error analysis
         time_points = list(range(50))
-        errors = np.random.normal(0, 5, 50)
+        errors = np.random.normal(0, 3, 50)
         fig.add_trace(
             go.Scatter(x=time_points, y=errors, mode='markers',
                       name='Prediction Errors', marker=dict(color='#E74C3C', size=8)),
@@ -461,15 +579,17 @@ elif page == "Forecast Analysis":
         )
         
         # Plot 4: Residual plot
-        actual = np.random.normal(60, 15, 50)
-        predicted = actual + np.random.normal(0, 5, 50)
+        actual = np.random.normal(70, 10, 50)
+        predicted = actual + np.random.normal(0, 3, 50)
+        actual = np.clip(actual, 0, 100)
+        predicted = np.clip(predicted, 0, 100)
         fig.add_trace(
             go.Scatter(x=actual, y=predicted, mode='markers',
                       name='Actual vs Predicted', marker=dict(color='#2ECC71', size=8)),
             row=2, col=2
         )
         fig.add_trace(
-            go.Scatter(x=[min(actual), max(actual)], y=[min(actual), max(actual)],
+            go.Scatter(x=[0, 100], y=[0, 100],
                       mode='lines', name='Perfect Fit', line=dict(color='black', dash='dash')),
             row=2, col=2
         )
@@ -484,7 +604,8 @@ elif page == "Historical Data":
     
     # Generate sample historical data
     dates = pd.date_range('2024-01-01', periods=100, freq='H')
-    historical_scores = 50 + 20 * np.sin(np.arange(100)/10) + np.random.randn(100)*10
+    historical_scores = 70 + 15 * np.sin(np.arange(100)/10) + np.random.randn(100)*8
+    historical_scores = np.clip(historical_scores, 0, 100)
     historical_pm25 = 20 + 10 * np.sin(np.arange(100)/10) + np.random.randn(100)*5
     
     historical_df = pd.DataFrame({
@@ -517,7 +638,7 @@ elif page == "Historical Data":
     fig1.update_layout(
         title='Historical Air Quality Trends',
         xaxis_title='Date',
-        yaxis=dict(title='Air Quality Score', color='#3498DB'),
+        yaxis=dict(title='Air Quality Score (0-100)', color='#3498DB', range=[0, 100]),
         yaxis2=dict(title='PM2.5 (μg/m³)', color='#E74C3C', overlaying='y', side='right'),
         height=500,
         template='plotly_white'
@@ -534,7 +655,8 @@ elif page == "Historical Data":
         corr_matrix,
         text_auto='.2f',
         color_continuous_scale='RdBu',
-        aspect='auto'
+        aspect='auto',
+        range_color=[-1, 1]
     )
     
     fig2.update_layout(height=400)
@@ -563,7 +685,7 @@ elif page == "Model Performance":
                     
                 # Performance metrics
                 st.metric("R² Score", "0.89")
-                st.metric("MAE", "4.2")
+                st.metric("Mean Absolute Error", "4.2")
                 st.metric("RMSE", "6.8")
             
             st.markdown('</div>', unsafe_allow_html=True)
@@ -640,8 +762,8 @@ else:  # Configuration page
             )
             
             st.markdown("#### Alert Thresholds")
-            warning_threshold = st.number_input("Warning Threshold (Score)", 50, 150, 100)
-            alert_threshold = st.number_input("Alert Threshold (Score)", 100, 300, 150)
+            warning_threshold = st.number_input("Warning Threshold (Score)", 40, 80, 50)
+            alert_threshold = st.number_input("Alert Threshold (Score)", 20, 60, 40)
         
         with col2:
             st.markdown("#### Data Settings")
