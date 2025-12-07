@@ -60,6 +60,7 @@ with st.sidebar:
     st.markdown("**Note**: Using saved LSTM model for predictions")
 
 # Define the model class first (must be identical to training)
+# Define the model class (EXACTLY as it was during training)
 class EnhancedLSTMModel(nn.Module):
     def __init__(self, input_size, hidden_size, num_layers, output_size, 
                  dropout_rate=0.3, use_batch_norm=True):
@@ -72,7 +73,8 @@ class EnhancedLSTMModel(nn.Module):
             batch_first=True, dropout=dropout_rate if num_layers > 1 else 0.0
         )
         
-        self.batch_norm = nn.BatchNorm1d(hidden_size) if use_batch_norm else None
+        # IMPORTANT: Name must be batch_norm_lstm (not batch_norm)
+        self.batch_norm_lstm = nn.BatchNorm1d(hidden_size) if use_batch_norm else None
         self.dropout = nn.Dropout(dropout_rate)
         self.fc = nn.Linear(hidden_size, output_size)
         
@@ -82,6 +84,7 @@ class EnhancedLSTMModel(nn.Module):
     def _init_weights(self):
         for name, param in self.named_parameters():
             if 'bias' in name and 'lstm' in name:
+                # Fill forget gate biases with 1.0
                 param.data[self.hidden_size:2*self.hidden_size].fill_(1.0)
     
     def forward(self, x):
@@ -90,15 +93,15 @@ class EnhancedLSTMModel(nn.Module):
         c0 = torch.zeros(self.num_layers, batch_size, self.hidden_size)
         
         out, _ = self.lstm(x, (h0, c0))
-        out = out[:, -1, :]
+        out = out[:, -1, :]  # Take last time step
         
-        if self.batch_norm is not None:
-            out = self.batch_norm(out)
+        if self.batch_norm_lstm is not None:
+            out = self.batch_norm_lstm(out)
         
         out = self.dropout(out)
         out = self.fc(out)
         return out.squeeze()
-
+        
 # Load the saved model - FIXED VERSION
 @st.cache_resource
 def load_saved_model():
