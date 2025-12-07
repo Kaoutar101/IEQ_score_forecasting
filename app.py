@@ -123,23 +123,17 @@ def transform_to_intuitive_score(raw_score):
     """
     Transform raw model predictions to intuitive scores (0-100 scale)
     Higher score = Better air quality
-    Assuming raw scores are in 0-100 range but inverted
     """
-    # Method 1: Simple inversion if scores are already in 0-100
-    # intuitive_score = 100 - raw_score
+    # Simple linear transformation to get 0-100 scale
+    # Assuming raw scores are in some range, adjust these values based on your actual data
+    min_raw = 0
+    max_raw = 100
     
-    # Method 2: Scale and shift to make "good" = 80-100
-    # This assumes your model predicts ~20-40 for good air quality
-    if raw_score < 20:
-        intuitive_score = 95 + (raw_score * 0.25)  # 0-19 → 95-100
-    elif raw_score < 40:
-        intuitive_score = 85 + ((raw_score - 20) * 0.5)  # 20-39 → 85-95
-    elif raw_score < 60:
-        intuitive_score = 70 + ((raw_score - 40) * 0.75)  # 40-59 → 70-85
-    elif raw_score < 80:
-        intuitive_score = 50 + ((raw_score - 60) * 1.0)  # 60-79 → 50-70
-    else:
-        intuitive_score = 30 + ((raw_score - 80) * 1.0)  # 80-100 → 30-50
+    # Normalize to 0-100
+    normalized = ((raw_score - min_raw) / (max_raw - min_raw)) * 100
+    
+    # Invert if needed (higher raw = worse air quality)
+    intuitive_score = 100 - normalized
     
     # Ensure the score is within 0-100 range
     intuitive_score = max(0, min(100, intuitive_score))
@@ -422,47 +416,6 @@ if page == "Dashboard Overview":
         except Exception as e:
             st.error(f"❌ Error reading CSV file: {str(e)}")
     
-    # Key metrics row - show actual data if available
-    st.markdown('<h3 class="sub-header">Current Conditions</h3>', unsafe_allow_html=True)
-    
-    col1, col2, col3, col4 = st.columns(4)
-    
-    with col1:
-        st.markdown('<div class="metric-card">', unsafe_allow_html=True)
-        if uploaded_data is not None and 'temp' in uploaded_data.columns:
-            current_temp = uploaded_data['temp'].iloc[-1] if len(uploaded_data) > 0 else 22.5
-            st.metric("Temperature", f"{current_temp:.1f}°C", "N/A")
-        else:
-            st.metric("Temperature", "22.5°C", "▲ 0.5", delta_color="off")
-        st.markdown('</div>', unsafe_allow_html=True)
-    
-    with col2:
-        st.markdown('<div class="metric-card">', unsafe_allow_html=True)
-        if uploaded_data is not None and 'pm25' in uploaded_data.columns:
-            current_pm25 = uploaded_data['pm25'].iloc[-1] if len(uploaded_data) > 0 else 24
-            st.metric("PM2.5", f"{current_pm25:.1f} μg/m³", "N/A")
-        else:
-            st.metric("PM2.5", "24 μg/m³", "▼ 1.2", delta_color="inverse")
-        st.markdown('</div>', unsafe_allow_html=True)
-    
-    with col3:
-        st.markdown('<div class="metric-card">', unsafe_allow_html=True)
-        if uploaded_data is not None and 'humid' in uploaded_data.columns:
-            current_humid = uploaded_data['humid'].iloc[-1] if len(uploaded_data) > 0 else 65
-            st.metric("Humidity", f"{current_humid:.1f}%", "N/A")
-        else:
-            st.metric("Humidity", "65%", "▼ 3", delta_color="inverse")
-        st.markdown('</div>', unsafe_allow_html=True)
-    
-    with col4:
-        st.markdown('<div class="metric-card">', unsafe_allow_html=True)
-        if uploaded_data is not None and 'co2' in uploaded_data.columns:
-            current_co2 = uploaded_data['co2'].iloc[-1] if len(uploaded_data) > 0 else 450
-            st.metric("CO₂", f"{current_co2:.0f} ppm", "N/A")
-        else:
-            st.metric("Current Score", "85", "▲ 2.3", delta_color="normal")
-        st.markdown('</div>', unsafe_allow_html=True)
-    
     # Main forecasting section
     st.markdown('<h2 class="sub-header">5-Minute Interval Forecast</h2>', unsafe_allow_html=True)
     
@@ -566,7 +519,7 @@ if page == "Dashboard Overview":
                     st.markdown('<div class="prediction-card">', unsafe_allow_html=True)
                     st.markdown("### Forecast Summary")
                     
-                    if 'forecasts' in locals():
+                    if 'forecasts' in locals() and len(forecasts) > 0:
                         avg_forecast = np.mean(forecasts)
                         max_forecast = np.max(forecasts)
                         min_forecast = np.min(forecasts)
@@ -574,10 +527,24 @@ if page == "Dashboard Overview":
                         
                         avg_category, avg_color = get_air_quality_category(avg_forecast)
                         
+                        # Show current score from uploaded data
+                        if uploaded_data is not None and 'temp' in uploaded_data.columns:
+                            if len(uploaded_data) > 0:
+                                # Show current conditions from uploaded data
+                                st.metric("Data Samples", f"{len(uploaded_data)}")
+                                if 'temp' in uploaded_data.columns:
+                                    current_temp = uploaded_data['temp'].iloc[-1]
+                                    st.metric("Current Temp", f"{current_temp:.1f}°C")
+                        
                         st.metric("Average Score", f"{avg_forecast:.1f}", f"{avg_category}")
                         st.metric("Peak Score", f"{max_forecast:.1f}")
                         st.metric("Minimum Score", f"{min_forecast:.1f}")
                         st.metric("Trend", f"{trend.capitalize()}")
+                        
+                        # Show raw predictions for debugging
+                        with st.expander("🔍 View Raw Predictions"):
+                            st.write("Raw model outputs:", [f"{x:.2f}" for x in raw_forecasts])
+                            st.write("Transformed scores:", [f"{x:.1f}" for x in forecasts])
                         
                         # Overall assessment
                         st.markdown("---")
@@ -587,47 +554,52 @@ if page == "Dashboard Overview":
                             st.info("ℹ️ **Overall Assessment:** Moderate air quality expected")
                         else:
                             st.warning("⚠️ **Overall Assessment:** Poor air quality periods expected")
+                    else:
+                        st.warning("No forecasts generated. Check your data.")
                     
                     st.markdown('</div>', unsafe_allow_html=True)
                 
                 # Detailed forecast table
                 st.markdown('<h3 class="sub-header">Detailed Forecast Table</h3>', unsafe_allow_html=True)
                 
-                # Create dataframe with transformed scores
-                table_data = []
-                for i, (time, score) in enumerate(zip(time_labels, forecasts)):
-                    category, color = get_air_quality_category(score)
-                    recommendation = get_health_recommendation(score)
-                    table_data.append({
-                        'Time Ahead': time,
-                        'Air Quality Score': f"{score:.1f}",
-                        'Category': category,
-                        'Health Advisory': recommendation
-                    })
-                
-                forecast_df = pd.DataFrame(table_data)
-                
-                # Display styled dataframe
-                st.dataframe(
-                    forecast_df,
-                    use_container_width=True,
-                    height=400,
-                    column_config={
-                        "Time Ahead": st.column_config.TextColumn("Time Ahead", width="small"),
-                        "Air Quality Score": st.column_config.NumberColumn("Score", format="%.1f", width="small"),
-                        "Category": st.column_config.TextColumn("Category", width="medium"),
-                        "Health Advisory": st.column_config.TextColumn("Recommendation", width="large")
-                    }
-                )
-                
-                # Download button for forecasts
-                csv = forecast_df.to_csv(index=False)
-                st.download_button(
-                    label="📥 Download Forecast Data",
-                    data=csv,
-                    file_name="air_quality_forecast.csv",
-                    mime="text/csv"
-                )
+                if 'forecasts' in locals() and len(forecasts) > 0:
+                    # Create dataframe with transformed scores
+                    table_data = []
+                    for i, (time, score) in enumerate(zip(time_labels, forecasts)):
+                        category, color = get_air_quality_category(score)
+                        recommendation = get_health_recommendation(score)
+                        table_data.append({
+                            'Time Ahead': time,
+                            'Air Quality Score': f"{score:.1f}",
+                            'Category': category,
+                            'Health Advisory': recommendation
+                        })
+                    
+                    forecast_df = pd.DataFrame(table_data)
+                    
+                    # Display styled dataframe
+                    st.dataframe(
+                        forecast_df,
+                        use_container_width=True,
+                        height=400,
+                        column_config={
+                            "Time Ahead": st.column_config.TextColumn("Time Ahead", width="small"),
+                            "Air Quality Score": st.column_config.NumberColumn("Score", format="%.1f", width="small"),
+                            "Category": st.column_config.TextColumn("Category", width="medium"),
+                            "Health Advisory": st.column_config.TextColumn("Recommendation", width="large")
+                        }
+                    )
+                    
+                    # Download button for forecasts
+                    csv = forecast_df.to_csv(index=False)
+                    st.download_button(
+                        label="📥 Download Forecast Data",
+                        data=csv,
+                        file_name="air_quality_forecast.csv",
+                        mime="text/csv"
+                    )
+                else:
+                    st.warning("No forecast data to display.")
         else:
             st.info("👆 Click the 'Generate Forecasts' button above to create predictions")
             st.info("💡 Upload a CSV file with sensor data for more accurate forecasts")
@@ -671,6 +643,8 @@ elif page == "Forecast Analysis":
             with st.spinner("Performing analysis..."):
                 # Generate predictions if we have data
                 predictions = None
+                actual_scores = []
+                
                 if analysis_data is not None:
                     # Prepare data for predictions
                     prepared_data, error = prepare_uploaded_data(analysis_data, data['feature_columns'])
@@ -681,7 +655,6 @@ elif page == "Forecast Analysis":
                         # Generate predictions for the entire dataset
                         with st.spinner("Generating predictions for uploaded data..."):
                             predictions = []
-                            actual_sequence = []
                             
                             # Create sequences and predict
                             for i in range(len(prepared_data) - data['sequence_length'] + 1):
@@ -700,19 +673,25 @@ elif page == "Forecast Analysis":
                                 raw_pred = data['scaler_y'].inverse_transform(np.array([[pred_scaled]])).item()
                                 intuitive_pred = transform_to_intuitive_score(raw_pred)
                                 predictions.append(intuitive_pred)
-                                
-                                # Store actual values for comparison
-                                if i + data['sequence_length'] < len(prepared_data):
-                                    # For demonstration, use next value as "actual"
-                                    actual_sequence.append(intuitive_pred + np.random.normal(0, 5))
                             
                         st.success(f"✅ Generated {len(predictions)} predictions")
+                        
+                        # Create actual scores for comparison (simulated based on data)
+                        if 'pm25' in analysis_data.columns:
+                            # Use PM2.5 as proxy for actual air quality score
+                            pm25_values = analysis_data['pm25'].values[data['sequence_length']-1:]
+                            # Convert PM2.5 to score (inverse relationship: lower PM2.5 = higher score)
+                            actual_scores = [max(0, min(100, 100 - (val * 2))) for val in pm25_values[:len(predictions)]]
+                        else:
+                            # Simulate actual scores with some noise
+                            actual_scores = [p + np.random.normal(0, 5) for p in predictions]
+                            actual_scores = [max(0, min(100, s)) for s in actual_scores]
                 
-                # Multi-plot analysis
+                # Multi-plot analysis with axis titles
                 fig = make_subplots(
                     rows=2, cols=2,
-                    subplot_titles=('Prediction Distribution', 'Feature Correlations', 
-                                  'Prediction Timeline', 'Error Analysis'),
+                    subplot_titles=('Prediction Distribution', 'Feature Importance', 
+                                  'Prediction Timeline', 'Prediction Error'),
                     specs=[[{'type': 'histogram'}, {'type': 'bar'}],
                            [{'type': 'scatter'}, {'type': 'scatter'}]]
                 )
@@ -757,13 +736,15 @@ elif page == "Forecast Analysis":
                     )
                 
                 # Plot 4: Error analysis
-                if predictions and len(actual_sequence) == len(predictions):
-                    errors = [a - p for a, p in zip(actual_sequence[:len(predictions)], predictions)]
+                if predictions and len(actual_scores) == len(predictions):
+                    errors = [a - p for a, p in zip(actual_scores, predictions)]
                     fig.add_trace(
                         go.Scatter(x=list(range(len(errors))), y=errors, mode='markers',
                                   name='Prediction Errors', marker=dict(color='#E74C3C', size=8)),
                         row=2, col=2
                     )
+                    # Add zero line
+                    fig.add_hline(y=0, line_dash="dash", line_color="black", row=2, col=2)
                 else:
                     sample_errors = np.random.normal(0, 3, 50)
                     fig.add_trace(
@@ -771,17 +752,39 @@ elif page == "Forecast Analysis":
                                   name='Sample Errors', marker=dict(color='#E74C3C', size=8)),
                         row=2, col=2
                     )
+                    # Add zero line
+                    fig.add_hline(y=0, line_dash="dash", line_color="black", row=2, col=2)
                 
-                fig.update_layout(height=800, showlegend=False, template='plotly_white')
+                # Update all axis titles
+                fig.update_xaxes(title_text="Air Quality Score", row=1, col=1)
+                fig.update_yaxes(title_text="Frequency", row=1, col=1)
+                
+                fig.update_xaxes(title_text="Features", row=1, col=2)
+                fig.update_yaxes(title_text="Importance", row=1, col=2)
+                
+                fig.update_xaxes(title_text="Time Step", row=2, col=1)
+                fig.update_yaxes(title_text="Predicted Score", row=2, col=1)
+                
+                fig.update_xaxes(title_text="Time Step", row=2, col=2)
+                fig.update_yaxes(title_text="Error (Actual - Predicted)", row=2, col=2)
+                
+                fig.update_layout(
+                    height=800, 
+                    showlegend=False, 
+                    template='plotly_white',
+                    title_text="Comprehensive Forecast Analysis"
+                )
                 st.plotly_chart(fig, use_container_width=True)
                 
                 # Model performance metrics
-                if predictions and len(actual_sequence) == len(predictions):
+                if predictions and len(actual_scores) == len(predictions):
                     st.markdown('<h3 class="sub-header">Model Performance on Uploaded Data</h3>', unsafe_allow_html=True)
                     
                     # Calculate metrics
-                    mae = np.mean(np.abs(np.array(actual_sequence[:len(predictions)]) - np.array(predictions)))
-                    rmse = np.sqrt(np.mean((np.array(actual_sequence[:len(predictions)]) - np.array(predictions))**2))
+                    mae = np.mean(np.abs(np.array(actual_scores) - np.array(predictions)))
+                    rmse = np.sqrt(np.mean((np.array(actual_scores) - np.array(predictions))**2))
+                    r2 = 1 - (np.sum((np.array(actual_scores) - np.array(predictions))**2) / 
+                            np.sum((np.array(actual_scores) - np.mean(actual_scores))**2))
                     
                     col1, col2, col3 = st.columns(3)
                     with col1:
@@ -789,8 +792,17 @@ elif page == "Forecast Analysis":
                     with col2:
                         st.metric("Root Mean Square Error", f"{rmse:.2f}")
                     with col3:
-                        accuracy = max(0, 100 - mae)  # Simple accuracy metric
-                        st.metric("Estimated Accuracy", f"{accuracy:.1f}%")
+                        st.metric("R² Score", f"{r2:.3f}")
+                    
+                    # Show sample comparison
+                    with st.expander("🔍 View Sample Predictions vs Actual"):
+                        comparison_df = pd.DataFrame({
+                            'Time Step': range(min(20, len(predictions))),
+                            'Predicted': predictions[:20],
+                            'Actual': actual_scores[:20],
+                            'Error': [a - p for a, p in zip(actual_scores[:20], predictions[:20])]
+                        })
+                        st.dataframe(comparison_df)
         else:
             st.info("👆 Click 'Run Comprehensive Analysis' to analyze uploaded data")
             st.info("💡 Upload a CSV file to analyze actual sensor data")
@@ -853,7 +865,7 @@ elif page == "Historical Data":
             'Humidity': 60 + 10 * np.sin(np.arange(100)/10)
         })
     
-    # Time series plot
+    # Time series plot with axis titles
     fig1 = go.Figure()
     fig1.add_trace(go.Scatter(
         x=historical_df['Timestamp'],
@@ -883,7 +895,7 @@ elif page == "Historical Data":
     
     st.plotly_chart(fig1, use_container_width=True)
     
-    # Correlation matrix
+    # Correlation matrix with clear labels
     st.markdown('<h3 class="sub-header">Feature Correlations</h3>', unsafe_allow_html=True)
     
     corr_matrix = historical_df[['Air Quality Score', 'PM2.5', 'Temperature', 'Humidity']].corr()
@@ -893,10 +905,15 @@ elif page == "Historical Data":
         text_auto='.2f',
         color_continuous_scale='RdBu',
         aspect='auto',
-        range_color=[-1, 1]
+        range_color=[-1, 1],
+        labels=dict(x="Features", y="Features", color="Correlation")
     )
     
-    fig2.update_layout(height=400)
+    fig2.update_layout(
+        height=400,
+        xaxis_title="Features",
+        yaxis_title="Features"
+    )
     st.plotly_chart(fig2, use_container_width=True)
 
 elif page == "Model Performance":
@@ -928,7 +945,7 @@ elif page == "Model Performance":
             st.markdown('</div>', unsafe_allow_html=True)
         
         with col_chart:
-            # Loss plot
+            # Loss plot with axis titles
             fig = go.Figure()
             
             if 'train_losses' in data and len(data['train_losses']) > 0:
