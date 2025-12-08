@@ -128,6 +128,43 @@ def get_air_quality_category(score):
     else:
         return "Very Poor", "#C0392B"
 
+def calculate_trendline(x, y):
+    """Calculate simple linear trendline without statsmodels"""
+    # Remove NaN values
+    mask = ~np.isnan(x) & ~np.isnan(y)
+    x_clean = x[mask]
+    y_clean = y[mask]
+    
+    if len(x_clean) < 2:
+        return None, None, None
+    
+    # Simple linear regression
+    n = len(x_clean)
+    sum_x = np.sum(x_clean)
+    sum_y = np.sum(y_clean)
+    sum_xy = np.sum(x_clean * y_clean)
+    sum_x2 = np.sum(x_clean ** 2)
+    
+    # Calculate slope and intercept
+    denominator = n * sum_x2 - sum_x ** 2
+    if denominator == 0:
+        return None, None, None
+    
+    slope = (n * sum_xy - sum_x * sum_y) / denominator
+    intercept = (sum_y - slope * sum_x) / n
+    
+    # Calculate R²
+    y_pred = slope * x_clean + intercept
+    ss_res = np.sum((y_clean - y_pred) ** 2)
+    ss_tot = np.sum((y_clean - np.mean(y_clean)) ** 2)
+    
+    if ss_tot == 0:
+        r_squared = 1.0
+    else:
+        r_squared = 1 - (ss_res / ss_tot)
+    
+    return slope, intercept, r_squared
+
 # ==================== MODEL LOADING ====================
 @st.cache_resource
 def load_saved_model():
@@ -571,11 +608,19 @@ elif page == "Data Analysis":
                 st.metric("Total Samples", len(analysis_data))
                 timestamp_col = [col for col in analysis_data.columns if any(keyword in col.lower() for keyword in ['time', 'date', 'timestamp'])]
                 if timestamp_col:
-                    st.metric("Start", str(pd.to_datetime(analysis_data[timestamp_col[0]]).iloc[0])[:16])
+                    try:
+                        start_date = pd.to_datetime(analysis_data[timestamp_col[0]]).iloc[0]
+                        st.metric("Start", str(start_date)[:16])
+                    except:
+                        st.metric("Start", "N/A")
             with col2:
                 st.metric("Columns", len(analysis_data.columns))
                 if timestamp_col:
-                    st.metric("End", str(pd.to_datetime(analysis_data[timestamp_col[0]]).iloc[-1])[:16])
+                    try:
+                        end_date = pd.to_datetime(analysis_data[timestamp_col[0]]).iloc[-1]
+                        st.metric("End", str(end_date)[:16])
+                    except:
+                        st.metric("End", "N/A")
             with col3:
                 missing_percent = (analysis_data.isnull().sum().sum() / (len(analysis_data) * len(analysis_data.columns))) * 100
                 st.metric("Missing Values", f"{missing_percent:.2f}%")
@@ -709,28 +754,57 @@ elif page == "Data Analysis":
                         y_var = st.selectbox("Y variable", numeric_columns, index=min(1, len(numeric_columns)-1))
                     
                     if x_var != y_var:
-                        fig_scatter = px.scatter(
-                            analysis_data,
-                            x=x_var,
-                            y=y_var,
-                            trendline='ols',
-                            trendline_color_override='red',
-                            opacity=0.6,
-                            title=f"{x_var} vs {y_var}",
-                            labels={x_var: x_var, y_var: y_var}
+                        # Create scatter plot manually without trendline option
+                        fig_scatter = go.Figure()
+                        
+                        fig_scatter.add_trace(go.Scatter(
+                            x=analysis_data[x_var],
+                            y=analysis_data[y_var],
+                            mode='markers',
+                            marker=dict(
+                                size=8,
+                                color='#3498DB',
+                                opacity=0.6,
+                                line=dict(width=1, color='DarkSlateGrey')
+                            ),
+                            name='Data points'
+                        ))
+                        
+                        # Calculate and add trendline manually
+                        slope, intercept, r_squared = calculate_trendline(
+                            analysis_data[x_var].values,
+                            analysis_data[y_var].values
                         )
+                        
+                        if slope is not None and intercept is not None:
+                            # Generate trendline points
+                            x_min = analysis_data[x_var].min()
+                            x_max = analysis_data[x_var].max()
+                            x_trend = np.linspace(x_min, x_max, 100)
+                            y_trend = slope * x_trend + intercept
+                            
+                            fig_scatter.add_trace(go.Scatter(
+                                x=x_trend,
+                                y=y_trend,
+                                mode='lines',
+                                line=dict(color='red', width=2, dash='dash'),
+                                name=f'Trendline (R²={r_squared:.3f})'
+                            ))
                         
                         # Calculate correlation
                         correlation = analysis_data[[x_var, y_var]].corr().iloc[0, 1]
                         
                         fig_scatter.update_layout(
+                            title=f"{x_var} vs {y_var}",
+                            xaxis_title=x_var,
+                            yaxis_title=y_var,
                             annotations=[
                                 dict(
                                     x=0.05,
                                     y=0.95,
                                     xref="paper",
                                     yref="paper",
-                                    text=f"Correlation: {correlation:.3f}",
+                                    text=f"Correlation: {correlation:.3f}<br>R²: {r_squared:.3f}" if r_squared else f"Correlation: {correlation:.3f}",
                                     showarrow=False,
                                     font=dict(size=12, color='black'),
                                     bgcolor='white',
@@ -740,7 +814,8 @@ elif page == "Data Analysis":
                                 )
                             ],
                             height=400,
-                            template='plotly_white'
+                            template='plotly_white',
+                            showlegend=True
                         )
                         
                         st.plotly_chart(fig_scatter, use_container_width=True)
@@ -795,7 +870,6 @@ elif page == "Data Analysis":
             
         except Exception as e:
             st.error(f"Error processing data: {str(e)}")
-            st.exception(e)
     else:
         st.info("📁 Upload a CSV file for comprehensive data analysis")
         st.markdown("""
