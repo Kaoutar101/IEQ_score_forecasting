@@ -128,20 +128,6 @@ def get_air_quality_category(score):
     else:
         return "Very Poor", "#C0392B"
 
-def get_health_recommendation(score):
-    """Get health recommendation based on score"""
-    if score >= 80:
-        return "Ideal for all outdoor activities"
-    elif score >= 70:
-        return "Good for outdoor activities"
-    elif score >= 60:
-        return "Generally acceptable for outdoor activities"
-    elif score >= 50:
-        return "Sensitive groups should reduce prolonged outdoor exposure"
-    elif score >= 40:
-        return "Limit prolonged outdoor activities"
-    else:
-        return "Avoid outdoor activities, especially for sensitive groups"
 
 # ==================== MODEL LOADING ====================
 @st.cache_resource
@@ -412,12 +398,10 @@ if page == "Forecasting":
                         table_data = []
                         for i, (time, score) in enumerate(zip(time_labels, scores)):
                             category, _ = get_air_quality_category(score)
-                            recommendation = get_health_recommendation(score)
                             table_data.append({
                                 'Time Ahead': time,
                                 'Score': f"{score:.1f}",
-                                'Category': category,
-                                'Recommendation': recommendation
+                                'Category': category
                             })
                         
                         forecast_df = pd.DataFrame(table_data)
