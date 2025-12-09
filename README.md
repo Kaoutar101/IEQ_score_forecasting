@@ -50,3 +50,4 @@ A key objective of this project is to **compare three deep-learning architecture
 
 ---
 
+Dashboard Link: https://ieqforecast.streamlit.app/
